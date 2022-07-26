@@ -1,7 +1,3 @@
-"""
-Deep leakage from gradients attack proposed by https://arxiv.org/abs/1906.08935
-"""
-
 import argparse
 import os
 

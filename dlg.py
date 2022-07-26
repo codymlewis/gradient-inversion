@@ -1,3 +1,7 @@
+"""
+Deep leakage from gradients attack proposed by https://arxiv.org/abs/1906.08935
+"""
+
 import argparse
 import operator
 
@@ -14,6 +18,7 @@ import models
 
 
 def dlg_loss(loss, params, true_grads):
+    """Finds the euclidean distance beween the gradient from dummy data and the true gradient"""
     @jax.jit
     def _apply(X, Y):
         norm_tree = jax.tree_map(lambda a, b: jnp.sum((a - b)**2), jax.grad(loss)(params, X, Y), true_grads)
@@ -22,6 +27,7 @@ def dlg_loss(loss, params, true_grads):
 
 
 def train_step(opt, loss):
+    """Finds the X and Y values of the dummy data"""
     @jax.jit
     def _apply(X, Y, Xopt_state, Yopt_state):
         loss_val, Xgrads = jax.value_and_grad(loss)(X, Y)
