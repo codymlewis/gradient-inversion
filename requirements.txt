@@ -1,0 +1,5 @@
+flax
+jaxopt
+optax
+tqdm
+einops
