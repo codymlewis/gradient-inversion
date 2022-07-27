@@ -58,6 +58,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default="Softmax", help="Model to train.")
     parser.add_argument('--steps', type=int, default=3000, help="Steps of training to perform.")
     parser.add_argument('--robust', action="store_true", help="Perform adversarially robust training.")
+    parser.add_argument('--batch-size', type=int, default=1, help="Batch size of the final gradient.")
     args = parser.parse_args()
 
     ds = load_dataset()
@@ -83,7 +84,8 @@ if __name__ == "__main__":
     with open(fn, 'wb') as f:
         f.write(serialization.to_bytes(params))
     print(f'Saved final model to {fn}')
-    grads = jax.grad(loss)(params, X[0:1], Y[0:1])
+    idx = rng.choice(train_len, args.batch_size, replace=False)
+    grads = jax.grad(loss)(params, X[idx], Y[idx])
     fn = f"data/{args.model}{'-robust' if args.robust else ''}.grads"
     with open(fn, 'wb') as f:
         f.write(serialization.to_bytes(grads))
