@@ -16,19 +16,19 @@ import matplotlib.pyplot as plt
 import models
 
 
-def cosine_sim(A, B):
+def cosine_dist(A, B):
     denom = jnp.maximum(jnp.linalg.norm(A, axis=1) * jnp.linalg.norm(B, axis=1), 1e-15)
-    return jnp.mean(jnp.einsum('br,br -> b', A, B) / denom)
+    return 1 - jnp.mean(jnp.abs(jnp.einsum('br,br -> b', A, B)) / denom)
 
 
 def total_variation(V):
     return abs(V[:, 1:, :] - V[:, :-1, :]).sum() + abs(V[:, :, 1:] - V[:, :, :-1]).sum()
 
 
-def atloss(model, params, true_reps):
+def atloss(model, params, true_reps, lamb_tv=1e-3):
     def _apply(Z):
-        # The paper says to use cos distance, but that makes the grads go in the wrong direction
-        return cosine_sim(model.apply(params, Z, representation=True), true_reps) #- 1e-9 * total_variation(Z)
+        dist = cosine_dist(model.apply(params, Z, representation=True), true_reps)
+        return dist + lamb_tv * total_variation(Z)
     return _apply
 
 
@@ -72,13 +72,17 @@ if __name__ == "__main__":
         Z, opt_state, loss_val = trainer(Z, opt_state)
         pbar.set_postfix_str(f"LOSS: {loss_val:.5f}")
     # Plot the results
-    if args.batch_size > 3:
-        nrows, ncols = round(math.sqrt(args.batch_size)), round(math.sqrt(args.batch_size))
+    if args.batch_size > 1:
+        if args.batch_size > 3:
+            nrows, ncols = round(math.sqrt(args.batch_size)), round(math.sqrt(args.batch_size))
+        else:
+            nrows, ncols = 1, args.batch_size
+        fig, axes = plt.subplots(nrows, ncols)
+        for i, ax in enumerate(axes.flatten()):
+            ax.set_title(f"Label: {labels[i]}")
+            ax.imshow(Z[i], cmap='binary')
     else:
-        nrows, ncols = 1, args.batch_size
-    fig, axes = plt.subplots(nrows, ncols)
-    for i, ax in enumerate(axes.flatten()):
-        ax.set_title(f"Label: {labels[i]}")
-        ax.imshow(Z[i], cmap='binary')
+        plt.title(f"Label: {labels[0]}")
+        plt.imshow(Z[0], cmap="binary")
     plt.tight_layout()
     plt.show()
