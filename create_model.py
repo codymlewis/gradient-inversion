@@ -25,18 +25,35 @@ def accuracy(model, params, X, Y, batch_size=1000):
     return acc / jnp.ceil(ds_size / batch_size)
 
 
-def train_step(opt, loss):
+def value_and_grad(loss):
+    def _apply(params, X, Y):
+        return jax.value_and_grad(loss)(params, X, Y)
+    return _apply
+
+
+def dp_value_and_grad(loss, S, sigma, rng=np.random.default_rng()):
+    """DP-FedAVG step from https://openreview.net/forum?id=BJ0hF1Z0b"""
+    def _apply(params, X, Y):
+        loss_val, grads = jax.value_and_grad(loss)(params, X, Y)
+        norm = jnp.linalg.norm(jax.flatten_util.ravel_pytree(params)[0])
+        grads = jax.tree_util.tree_map(lambda x: x / jnp.maximum(norm / S, 1), grads)
+        grads = jax.tree_util.tree_map(lambda x: x + rng.normal(0, S**2 * sigma**2, x.shape), grads)
+        return loss_val, grads
+    return _apply
+
+
+def train_step(opt, value_and_grad):
     """The training function using optax, also returns the training loss"""
     @jax.jit
     def _apply(params, opt_state, X, Y):
-        loss_val, grads = jax.value_and_grad(loss)(params, X, Y)
+        loss_val, grads = value_and_grad(params, X, Y)
         updates, opt_state = opt.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss_val
     return _apply
 
 
-def robust_train_step(opt, loss, epsilon=0.3, lr=0.001, steps=40):
+def robust_train_step(opt, loss, value_and_grad, epsilon=0.3, lr=0.001, steps=40):
     """AT training step proposed in https://arxiv.org/pdf/1706.06083.pdf"""
     @jax.jit
     def _apply(params, opt_state, X, Y):
@@ -46,7 +63,7 @@ def robust_train_step(opt, loss, epsilon=0.3, lr=0.001, steps=40):
             X = X + lr * jnp.sign(grads)
             X = jnp.clip(X, X_nat - epsilon, X_nat + epsilon)
             X = jnp.clip(X, 0, 1)
-        loss_val, grads = jax.value_and_grad(loss)(params, X, Y)
+        loss_val, grads = value_and_grad(params, X, Y)
         updates, opt_state = opt.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss_val
@@ -78,23 +95,30 @@ if __name__ == "__main__":
     parser.add_argument('--grad-steps', type=int, default=1, help="Number of steps for gradient production.")
     parser.add_argument('--checkpoint', action="store_true", help="Skip training and only make gradients.")
     parser.add_argument('--robust', action="store_true", help="Perform adversarially robust training.")
+    parser.add_argument('--dp', action="store_true", help="Perform differentially private training.")
     parser.add_argument('--batch-size', type=int, default=1, help="Batch size of the final gradient.")
     args = parser.parse_args()
 
     ds = load_dataset()
     X, Y = ds['train']['X'], ds['train']['Y']
     model = getattr(models, args.model)()
-    params = model.init(jax.random.PRNGKey(42), X[:32])
+    key = jax.random.PRNGKey(42)
+    key, pkey = jax.random.split(key)
+    params = model.init(pkey, X[:32])
     opt = optax.sgd(0.1)
     opt_state = opt.init(params)
     loss = losses.celoss_int_labels(model)
-    if args.robust:
-        trainer = robust_train_step(opt, loss)
+    if args.dp:
+        v_and_g = dp_value_and_grad(loss, 0.1,  0.1)
     else:
-        trainer = train_step(opt, loss)
+        v_and_g = value_and_grad(loss)
+    if args.robust:
+        trainer = robust_train_step(opt, loss, v_and_g)
+    else:
+        trainer = train_step(opt, v_and_g)
     rng = np.random.default_rng()
     train_len = len(Y)
-    fn = f"data/{args.model}{'-robust' if args.robust else ''}.params"
+    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.params"
     if args.checkpoint:
         with open(fn, 'rb') as f:
             params = serialization.from_bytes(params, f.read())
@@ -114,7 +138,7 @@ if __name__ == "__main__":
         idx = rng.choice(train_len, args.batch_size, replace=False)
         new_params, opt_state, loss_val = trainer(new_params, opt_state, X[idx], Y[idx])
     grads = jax.tree_util.tree_map(operator.sub, params, new_params)
-    fn = f"data/{args.model}{'-robust' if args.robust else ''}.grads"
+    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.grads"
     with open(fn, 'wb') as f:
         f.write(serialization.to_bytes(grads))
     print(f'Saved final gradient to {fn}')

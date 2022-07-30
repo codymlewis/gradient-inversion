@@ -47,16 +47,17 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default="Softmax", help="Model to train.")
     parser.add_argument('--steps', type=int, default=500, help="Steps of training to perform.")
     parser.add_argument('--robust', action="store_true", help="Attack a robustly trained model.")
+    parser.add_argument('--dp', action="store_true", help="Attack a DP trained model.")
     parser.add_argument('--batch-size', type=int, default=1,
                         help="Batch size to perform the attack on.")
     args = parser.parse_args()
 
     model = getattr(models, args.model)()
     params = model.init(jax.random.PRNGKey(0), jnp.zeros((32, 28, 28, 1)))
-    fn = f"data/{args.model}{'-robust' if args.robust else ''}.params"
+    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.params"
     with open(fn, 'rb') as f:
         params = serialization.from_bytes(params, f.read())
-    fn = f"data/{args.model}{'-robust' if args.robust else ''}.grads"
+    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.grads"
     with open(fn, 'rb') as f:
         true_grads = serialization.from_bytes(params, f.read())
     labels = jnp.argsort(
