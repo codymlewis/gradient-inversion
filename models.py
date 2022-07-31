@@ -226,8 +226,6 @@ class SE(nn.Module):
 
 
 class ResNetRS50(nn.Module):
-    num_classes: int
-
     @nn.compact
     def __call__(self, x, train=True, representation=False):
         x = STEM()(x, train)
@@ -249,6 +247,6 @@ class ResNetRS50(nn.Module):
         x = nn.Dropout(0.25, deterministic=train, name="top_dropout")(x)
         if representation:
             return x
-        x = nn.Dense(self.num_classes, name="classifier")(x)
+        x = nn.Dense(10, name="classifier")(x)
         x = nn.softmax(x)
         return x

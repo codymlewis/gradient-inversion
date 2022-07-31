@@ -26,16 +26,17 @@ def total_variation(V):
 
 
 def atloss(model, params, true_reps, lamb_tv=1e-3):
-    def _apply(Z):
-        dist = cosine_dist(model.apply(params, Z, representation=True), true_reps)
+    def _apply(Z, rng):
+        logits = model.apply(params, Z, train=False, representation=True, rngs={'dropout': rng})
+        dist = cosine_dist(logits, true_reps)
         return dist + lamb_tv * total_variation(Z)
     return _apply
 
 
 def train_step(opt, loss):
     @jax.jit
-    def _apply(Z, opt_state):
-        loss_val, grads = jax.value_and_grad(loss)(Z)
+    def _apply(Z, opt_state, rng):
+        loss_val, grads = jax.value_and_grad(loss)(Z, rng)
         updates, opt_state = opt.update(grads, opt_state, Z)
         Z = jnp.clip(optax.apply_updates(Z, updates), 0, 1)
         return Z, opt_state, loss_val
@@ -64,13 +65,15 @@ if __name__ == "__main__":
         jnp.min(true_grads['params']['classifier']['kernel'], axis=0)
     )[:args.batch_size]
     true_reps = true_grads['params']['classifier']['kernel'].T[labels.tolist()]
-    Z = jax.random.normal(jax.random.PRNGKey(42), (args.batch_size, 28, 28, 1))
+    nkey, dkey = jax.random.split(jax.random.PRNGKey(42))
+    Z = jax.random.normal(nkey, (args.batch_size, 28, 28, 1))
     Z = jnp.clip(Z, 0, 1)
     opt = optax.adam(0.01)
     opt_state = opt.init(Z)
     trainer = train_step(opt, atloss(model, params, true_reps))
     for _ in (pbar := trange(args.steps)):
-        Z, opt_state, loss_val = trainer(Z, opt_state)
+        use_dkey, dkey = jax.random.split(dkey)
+        Z, opt_state, loss_val = trainer(Z, opt_state, use_dkey)
         pbar.set_postfix_str(f"LOSS: {loss_val:.5f}")
     # Plot the results
     if args.batch_size > 1:

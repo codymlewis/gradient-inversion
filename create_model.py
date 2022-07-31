@@ -9,64 +9,90 @@ import optax
 import jax
 import jax.numpy as jnp
 from flax import serialization
+from flax.core.frozen_dict import FrozenDict
 from tqdm import trange
 
-import losses
 import models
 
 
-def accuracy(model, params, X, Y, batch_size=1000):
+def celoss(model):
+    """Cross entropy loss with some clipping to prevent NaNs"""
+    @jax.jit
+    def _apply(variables, X, Y):
+        logits, batch_stats = model.apply(variables, X, mutable=['batch_stats'])
+        logits = jnp.clip(logits, 1e-15, 1 - 1e-15)
+        one_hot = jax.nn.one_hot(Y, logits.shape[-1])
+        return -jnp.mean(jnp.einsum("bl,bl -> b", one_hot, jnp.log(logits))), batch_stats
+    return _apply
+
+
+def accuracy(model, params, X, Y, rng=jax.random.PRNGKey(0), batch_size=1000):
     """Accuracy metric using batch size to prevent OOM errors"""
     acc = 0
     ds_size = len(Y)
     for i in range(0, ds_size, batch_size):
+        rng, use_rng = jax.random.split(rng)
         end = min(i + batch_size, ds_size)
-        acc += jnp.mean(jnp.argmax(model.apply(params, X[i:end]), axis=-1) == Y[i:end])
+        logits = model.apply(params, X[i:end], rngs={'dropout': use_rng}, train=False)
+        acc += jnp.mean(jnp.argmax(logits, axis=-1) == Y[i:end])
     return acc / jnp.ceil(ds_size / batch_size)
 
 
 def value_and_grad(loss):
-    def _apply(params, X, Y):
-        return jax.value_and_grad(loss)(params, X, Y)
+    def _apply(variables, X, Y):
+        return jax.value_and_grad(loss, has_aux=True)(variables, X, Y)
     return _apply
 
 
 def dp_value_and_grad(loss, S, sigma, rng=np.random.default_rng()):
     """DP-FedAVG step from https://openreview.net/forum?id=BJ0hF1Z0b"""
     def _apply(params, X, Y):
-        loss_val, grads = jax.value_and_grad(loss)(params, X, Y)
+        (loss_val, batch_stats), grads = jax.value_and_grad(loss, has_aux=True)(params, X, Y)
         norm = jnp.linalg.norm(jax.flatten_util.ravel_pytree(params)[0])
         grads = jax.tree_util.tree_map(lambda x: x / jnp.maximum(norm / S, 1), grads)
         grads = jax.tree_util.tree_map(lambda x: x + rng.normal(0, S**2 * sigma**2, x.shape), grads)
-        return loss_val, grads
+        return (loss_val, batch_stats), grads
     return _apply
 
 
 def train_step(opt, value_and_grad):
     """The training function using optax, also returns the training loss"""
     @jax.jit
-    def _apply(params, opt_state, X, Y):
-        loss_val, grads = value_and_grad(params, X, Y)
-        updates, opt_state = opt.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        return params, opt_state, loss_val
+    def _apply(variables, opt_state, X, Y, *args):
+        (loss_val, batch_stats), grads = value_and_grad(variables, X, Y)
+        updates, opt_state = opt.update(grads, opt_state, variables)
+        params = optax.apply_updates(variables, updates)
+        state = FrozenDict({'params': params['params'], 'batch_stats': batch_stats['batch_stats']})
+        return state, opt_state, loss_val, None
     return _apply
 
 
 def robust_train_step(opt, loss, value_and_grad, epsilon=0.3, lr=0.001, steps=40):
     """AT training step proposed in https://arxiv.org/pdf/1706.06083.pdf"""
     @jax.jit
-    def _apply(params, opt_state, X, Y):
+    def _apply(variables, opt_state, X, Y, rng):
         X_nat = X
         for _ in range(steps):
-            grads = jax.grad(loss, argnums=1)(params, X, Y)
+            use_rng, rng = jax.random.split(rng)
+            grads = jax.grad(loss, argnums=1)(variables, X, Y, use_rng)
             X = X + lr * jnp.sign(grads)
             X = jnp.clip(X, X_nat - epsilon, X_nat + epsilon)
             X = jnp.clip(X, 0, 1)
-        loss_val, grads = value_and_grad(params, X, Y)
-        updates, opt_state = opt.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        return params, opt_state, loss_val
+        (loss_val, batch_stats), grads = value_and_grad(variables, X, Y)
+        updates, opt_state = opt.update(grads, opt_state, variables)
+        params = optax.apply_updates(variables, updates)
+        state = FrozenDict({'params': params['params'], 'batch_stats': batch_stats['batch_stats']})
+        return state, opt_state, loss_val, rng
+    return _apply
+
+
+def robust_celoss(model):
+    """CE Loss for the robust training"""
+    @jax.jit
+    def _apply(variables, X, Y, rng):
+        logits = jnp.clip(model.apply(variables, X, train=False, rngs={'dropout': rng}), 1e-15, 1 - 1e-15)
+        one_hot = jax.nn.one_hot(Y, logits.shape[-1])
+        return -jnp.mean(jnp.einsum("bl,bl -> b", one_hot, jnp.log(logits)))
     return _apply
 
 
@@ -107,13 +133,13 @@ if __name__ == "__main__":
     params = model.init(pkey, X[:32])
     opt = optax.sgd(0.1)
     opt_state = opt.init(params)
-    loss = losses.celoss_int_labels(model)
+    loss = celoss(model)
     if args.dp:
         v_and_g = dp_value_and_grad(loss, 0.1,  0.1)
     else:
         v_and_g = value_and_grad(loss)
     if args.robust:
-        trainer = robust_train_step(opt, loss, v_and_g)
+        trainer = robust_train_step(opt, robust_celoss(model), v_and_g)
     else:
         trainer = train_step(opt, v_and_g)
     rng = np.random.default_rng()
@@ -125,7 +151,7 @@ if __name__ == "__main__":
     else:
         for _ in (pbar := trange(args.steps)):
             idx = rng.choice(train_len, 32, replace=False)
-            params, opt_state, loss_val = trainer(params, opt_state, X[idx], Y[idx])
+            params, opt_state, loss_val, key = trainer(params, opt_state, X[idx], Y[idx], key)
             pbar.set_postfix_str(f"LOSS: {loss_val:.5f}")
         print(f"Final accuracy: {accuracy(model, params, ds['test']['X'], ds['test']['Y']):.3%}")
         os.makedirs('data', exist_ok=True)
@@ -136,7 +162,7 @@ if __name__ == "__main__":
     new_params = params
     for _ in (pbar := trange(args.grad_steps)):
         idx = rng.choice(train_len, args.batch_size, replace=False)
-        new_params, opt_state, loss_val = trainer(new_params, opt_state, X[idx], Y[idx])
+        new_params, opt_state, loss_val, key = trainer(new_params, opt_state, X[idx], Y[idx], key)
     grads = jax.tree_util.tree_map(operator.sub, params, new_params)
     fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.grads"
     with open(fn, 'wb') as f:
