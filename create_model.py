@@ -28,13 +28,16 @@ def celoss(model):
 
 def accuracy(model, params, X, Y, rng=jax.random.PRNGKey(0), batch_size=1000):
     """Accuracy metric using batch size to prevent OOM errors"""
+    @jax.jit
+    def apply(params, X, Y, use_rng):
+        logits = model.apply(params, X[i:end], rngs={'dropout': use_rng}, train=False)
+        return jnp.mean(jnp.argmax(logits, axis=-1) == Y[i:end])
     acc = 0
     ds_size = len(Y)
     for i in range(0, ds_size, batch_size):
         rng, use_rng = jax.random.split(rng)
         end = min(i + batch_size, ds_size)
-        logits = model.apply(params, X[i:end], rngs={'dropout': use_rng}, train=False)
-        acc += jnp.mean(jnp.argmax(logits, axis=-1) == Y[i:end])
+        acc += apply(params, X[i:end], Y[i:end], use_rng)
     return acc / jnp.ceil(ds_size / batch_size)
 
 
@@ -117,11 +120,11 @@ def load_dataset():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and save a model to be attacked.")
     parser.add_argument('--model', type=str, default="Softmax", help="Model to train.")
-    parser.add_argument('--steps', type=int, default=3000, help="Steps of training to perform.")
+    parser.add_argument('--steps', type=int, default=30000, help="Steps of training to perform.")
     parser.add_argument('--grad-steps', type=int, default=1, help="Number of steps for gradient production.")
     parser.add_argument('--checkpoint', action="store_true", help="Skip training and only make gradients.")
     parser.add_argument('--robust', action="store_true", help="Perform adversarially robust training.")
-    parser.add_argument('--dp', action="store_true", help="Perform differentially private training.")
+    parser.add_argument('--dp', type=float, nargs='*', help="Perform differentially private training.")
     parser.add_argument('--batch-size', type=int, default=1, help="Batch size of the final gradient.")
     args = parser.parse_args()
 
@@ -131,11 +134,15 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
     key, pkey = jax.random.split(key)
     params = model.init(pkey, X[:32])
-    opt = optax.sgd(0.1)
+    opt = optax.sgd(0.01, momentum=0.9)
     opt_state = opt.init(params)
     loss = celoss(model)
-    if args.dp:
-        v_and_g = dp_value_and_grad(loss, 0.1,  0.1)
+    if args.dp is not None:
+        if len(args.dp) == 2:
+            S, sigma = args.dp
+        else:
+            S, sigma = 0.1, 0.1
+        v_and_g = dp_value_and_grad(loss, S, sigma)
     else:
         v_and_g = value_and_grad(loss)
     if args.robust:
@@ -144,7 +151,10 @@ if __name__ == "__main__":
         trainer = train_step(opt, v_and_g)
     rng = np.random.default_rng()
     train_len = len(Y)
-    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.params"
+    fn = "data/{}{}{}.params".format(
+        args.model, '-robust' if args.robust else '',
+        f'-dp-S{S}-sigma{sigma}' if args.dp is not None else ''
+    )
     if args.checkpoint:
         with open(fn, 'rb') as f:
             params = serialization.from_bytes(params, f.read())
@@ -164,7 +174,10 @@ if __name__ == "__main__":
         idx = rng.choice(train_len, args.batch_size, replace=False)
         new_params, opt_state, loss_val, key = trainer(new_params, opt_state, X[idx], Y[idx], key)
     grads = jax.tree_util.tree_map(operator.sub, params, new_params)
-    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.grads"
+    fn = "data/{}{}{}.grads".format(
+        args.model, '-robust' if args.robust else '',
+        f'-dp-S{S}-sigma{sigma}' if args.dp is not None else ''
+    )
     with open(fn, 'wb') as f:
         f.write(serialization.to_bytes(grads))
     print(f'Saved final gradient to {fn}')
