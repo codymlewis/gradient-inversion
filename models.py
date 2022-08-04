@@ -6,6 +6,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import flax.linen as nn
+import einops
 
 ModuleDef = Any
 
@@ -160,9 +161,7 @@ class SE(nn.Module):
     @nn.compact
     def __call__(self, x):
         inputs = x
-        x = jnp.mean(x, axis=(-2, -1))  # global average pooling
-        se_shape = (x.shape[0], 1, 1, x.shape[-1])
-        x = x.reshape(se_shape)
+        x = einops.reduce(x, 'b h w d -> b 1 1 d', 'mean')  # global average pooling
         num_reduced_filters = max(1, int(self.in_filters * 4 * self.se_ratio))
         x = nn.Conv(
             num_reduced_filters,
@@ -202,8 +201,7 @@ class ResNetRS50(nn.Module):
                 num_repeats=block_arg["num_repeats"],
                 counter=i
             )(x, train)
-        # global average pooling
-        x = jnp.mean(x, axis=(-2, -1))
+        x = einops.reduce(x, 'b h w d -> b d', 'mean')  # global average pooling
         x = nn.Dropout(0.25, deterministic=train, name="top_dropout")(x)
         if representation:
             return x
