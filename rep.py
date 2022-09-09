@@ -5,9 +5,7 @@ Attack proposed in https://arxiv.org/abs/2202.10546
 
 import argparse
 import math
-from typing import Callable, Tuple
 
-import flax.linen as nn
 from flax import serialization
 import jax
 import jax.numpy as jnp
@@ -18,42 +16,25 @@ import matplotlib.pyplot as plt
 import models
 
 
-def find_in_dict(data: dict, key: str) -> dict:
-    """Find part of the data corresponding to the key, from within a linear dictionary"""
-    cur_keys = data.keys()
-    if key in cur_keys:
-        return data[key]
-    return find_in_dict(data[next(iter(cur_keys))], key)
-
-
-def cosine_dist(A: jnp.array, B: jnp.array) -> float:
+def cosine_dist(A, B):
     denom = jnp.maximum(jnp.linalg.norm(A, axis=1) * jnp.linalg.norm(B, axis=1), 1e-15)
     return 1 - jnp.mean(jnp.abs(jnp.einsum('br,br -> b', A, B)) / denom)
 
 
-def total_variation(V: jnp.array) -> float:
+def total_variation(V):
     return abs(V[:, 1:, :] - V[:, :-1, :]).sum() + abs(V[:, :, 1:] - V[:, :, :-1]).sum()
 
 
-def atloss(
-    model: nn.Module, params: optax.Params, true_reps: jnp.array, lamb_tv: float = 1e-3
-) -> Callable[[jnp.array], float]:
-    def _apply(Z: jnp.array) -> float:
-        dist = cosine_dist(
-            model.apply(
-                params, Z, representation=True, mutable=['batch_stats']
-            )[0],
-            true_reps
-        )
+def atloss(model, params, true_reps, lamb_tv=1e-3):
+    def _apply(Z):
+        dist = cosine_dist(model.apply(params, Z, representation=True), true_reps)
         return dist + lamb_tv * total_variation(Z)
     return _apply
 
 
-def train_step(
-    opt: optax.GradientTransformation, loss: Callable[[jnp.array], float]
-) -> Callable[[jnp.array, optax.OptState], Tuple[jnp.array, optax.OptState, float]]:
+def train_step(opt, loss):
     @jax.jit
-    def _apply(Z: jnp.array, opt_state: optax.OptState):
+    def _apply(Z, opt_state):
         loss_val, grads = jax.value_and_grad(loss)(Z)
         updates, opt_state = opt.update(grads, opt_state, Z)
         Z = jnp.clip(optax.apply_updates(Z, updates), 0, 1)
@@ -66,35 +47,24 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default="Softmax", help="Model to train.")
     parser.add_argument('--steps', type=int, default=500, help="Steps of training to perform.")
     parser.add_argument('--robust', action="store_true", help="Attack a robustly trained model.")
-    parser.add_argument('--dp', type=float, nargs='*', help="Perform differentially private training.")
+    parser.add_argument('--dp', action="store_true", help="Attack a DP trained model.")
     parser.add_argument('--batch-size', type=int, default=1,
                         help="Batch size to perform the attack on.")
     args = parser.parse_args()
 
     model = getattr(models, args.model)()
-    params = model.init(jax.random.PRNGKey(0), jnp.zeros((32, 224, 224, 3)))
-    if args.dp is not None:
-        if len(args.dp) == 2:
-            S, sigma = args.dp
-        else:
-            S, sigma = 0.1, 0.1
-    fn = "data/{}{}{}.variables".format(
-        args.model, '-robust' if args.robust else '',
-        f'-dp-S{S}-sigma{sigma}' if args.dp is not None else ''
-    )
+    params = model.init(jax.random.PRNGKey(0), jnp.zeros((32, 28, 28, 1)))
+    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.params"
     with open(fn, 'rb') as f:
         params = serialization.from_bytes(params, f.read())
-    fn = "data/{}{}{}.grads".format(
-        args.model, '-robust' if args.robust else '',
-        f'-dp-S{S}-sigma{sigma}' if args.dp is not None else ''
-    )
+    fn = f"data/{args.model}{'-robust' if args.robust else ''}{'-dp' if args.dp else ''}.grads"
     with open(fn, 'rb') as f:
         true_grads = serialization.from_bytes(params, f.read())
     labels = jnp.argsort(
-        jnp.min(find_in_dict(true_grads['params'], 'predictions')['kernel'], axis=0)
+        jnp.min(true_grads['params']['classifier']['kernel'], axis=0)
     )[:args.batch_size]
-    true_reps = find_in_dict(true_grads['params'], 'predictions')['kernel'].T[labels.tolist()]
-    Z = jax.random.normal(jax.random.PRNGKey(42), (args.batch_size, 224, 224, 3))
+    true_reps = true_grads['params']['classifier']['kernel'].T[labels.tolist()]
+    Z = jax.random.normal(jax.random.PRNGKey(42), (args.batch_size, 28, 28, 1))
     Z = jnp.clip(Z, 0, 1)
     opt = optax.adam(0.01)
     opt_state = opt.init(Z)
