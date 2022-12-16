@@ -20,9 +20,10 @@ def accuracy(model, params, X, Y, batch_size=1000):
     """Accuracy metric using batch size to prevent OOM errors"""
     acc = 0
     ds_size = len(Y)
-    for i in range(0, ds_size, batch_size):
+    for i in (pbar := trange(0, ds_size, batch_size)):
         end = min(i + batch_size, ds_size)
         acc += jnp.mean(jnp.argmax(model.apply(params, X[i:end]), axis=-1) == Y[i:end])
+        pbar.set_postfix_str(f"Running Acc: {acc / jnp.ceil((i + 1) / batch_size):.3%}")
     return acc / jnp.ceil(ds_size / batch_size)
 
 
