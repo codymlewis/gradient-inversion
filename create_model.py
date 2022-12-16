@@ -13,6 +13,7 @@ from tqdm import trange
 
 import losses
 import models
+import optimizers
 
 
 def accuracy(model, params, X, Y, batch_size=1000):
@@ -105,7 +106,14 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
     key, pkey = jax.random.split(key)
     params = model.init(pkey, X[:32])
-    opt = optax.sgd(0.1)
+    if args.dp is not None:
+        if len(args.dp) == 2:
+            S, sigma = args.dp
+        else:
+            S, sigma = 0.1, 0.1
+        opt = optimizers.dpsgd(0.1, S, sigma, 0)
+    else:
+        opt = optax.sgd(0.1)
     opt_state = opt.init(params)
     loss = losses.celoss_int_labels(model)
     if args.dp:
